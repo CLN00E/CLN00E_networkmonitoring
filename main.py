@@ -5,7 +5,11 @@ from queue import Empty, Queue
 from tkinter import ttk
 
 from h1_monitor import HLServiceMonitor
+from h1_logger import hl_save_measurement
 
+import csv
+from pathlib import Path
+import matplotlib.pyplot as plt
 
 services = [
     HLServiceMonitor("Google", "https://www.google.com", "HTTPS"),
@@ -16,7 +20,7 @@ services = [
 
 root = tk.Tk()
 root.title("Network & Service Monitor")
-root.geometry("900x520")
+root.geometry("900x650")
 root.minsize(700, 420)
 root.configure(bg="#111827")
 
@@ -55,7 +59,7 @@ table = ttk.Treeview(
     app,
     columns=columns,
     show="headings",
-    height=8
+    height=5
 )
 
 table.heading("name", text="Szolgáltatás")
@@ -73,7 +77,7 @@ table.column("checked", width=200, anchor="center")
 table.tag_configure("online", foreground="#15803d")
 table.tag_configure("offline", foreground="#dc2626")
 
-table.pack(fill="both", expand=True)
+table.pack(fill="x", expand=False)
 
 for service in services:
     table.insert(
@@ -92,7 +96,7 @@ status_label.pack(anchor="w", pady=15)
 
 results_queue = Queue()
 checking = False
-
+auto_check = tk.BooleanVar(value=False)
 
 def update_table(result):
     name = result["name"]
@@ -134,6 +138,11 @@ def start_check():
     worker = threading.Thread(target=run_checks, daemon=True)
     worker.start()
 
+def automatic_check():
+    if auto_check.get():
+        start_check()
+
+    root.after(10000, automatic_check)
 
 def process_results():
     global checking
@@ -148,11 +157,127 @@ def process_results():
                 status_label.config(text="Az ellenőrzés befejeződött.")
             else:
                 update_table(result)
+                hl_save_measurement(result)
 
     except Empty:
         pass
 
     root.after(100, process_results)
+
+
+def show_chart():
+    file_path = Path(__file__).resolve().parent / "data" / "measurements.csv"
+
+    if not file_path.exists():
+        status_label.config(text="Még nincsenek mentett mérési adatok.")
+        return
+
+    measurements = {}
+
+    with file_path.open("r", encoding="utf-8-sig", newline="") as file:
+        reader = csv.DictReader(file, delimiter=";")
+
+        for row in reader:
+            name = row["Szolgáltatás"]
+            response_time = row["Válaszidő (ms)"]
+
+            if not response_time:
+                continue
+
+            if name not in measurements:
+                measurements[name] = []
+
+            measurements[name].append(float(response_time))
+
+    if not measurements:
+        status_label.config(text="Nincs megjeleníthető válaszidő.")
+        return
+
+    plt.figure(figsize=(10, 5))
+
+    for name, values in measurements.items():
+        values = values[-20:]
+        plt.plot(
+            range(1, len(values) + 1),
+            values,
+            marker="o",
+            label=name
+        )
+
+    plt.title("Szolgáltatások válaszideje")
+    plt.xlabel("Utolsó mérések sorszáma")
+    plt.ylabel("Válaszidő (ms)")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show(block=False)
+
+
+def add_service():
+    window = tk.Toplevel(root)
+    window.title("Új szolgáltatás hozzáadása")
+    window.geometry("380x270")
+    window.resizable(False, False)
+
+    ttk.Label(window, text="Szolgáltatás neve:").pack(pady=(15, 5))
+    name_entry = ttk.Entry(window, width=35)
+    name_entry.pack()
+
+    ttk.Label(window, text="Cím (URL vagy IP):").pack(pady=(10, 5))
+    address_entry = ttk.Entry(window, width=35)
+    address_entry.pack()
+
+    ttk.Label(window, text="Ellenőrzés módja:").pack(pady=(10, 5))
+    method_var = tk.StringVar(value="HTTPS")
+
+    method_box = ttk.Combobox(
+        window,
+        textvariable=method_var,
+        values=["HTTPS", "PING"],
+        state="readonly",
+        width=32
+    )
+    method_box.pack()
+
+    def save_service():
+        name = name_entry.get().strip()
+        address = address_entry.get().strip()
+        method = method_var.get()
+
+        if not name or not address:
+            status_label.config(text="A név és a cím megadása kötelező.")
+            return
+
+        if any(service.name == name for service in services):
+            status_label.config(text="Ez a szolgáltatásnév már létezik.")
+            return
+
+        if method == "HTTPS" and not address.startswith(("http://", "https://")):
+            address = "https://" + address
+
+        if method == "PING" and (
+            "://" in address or "/" in address or " " in address
+        ):
+            status_label.config(text="PING esetén IP-címet vagy hosztnevet adj meg.")
+            return
+
+        services.append(HLServiceMonitor(name, address, method))
+
+        table.insert(
+            "",
+            "end",
+            iid=name,
+            values=(name, method, "Nincs adat", "-", "-")
+        )
+
+        status_label.config(text=f"Új szolgáltatás hozzáadva: {name}")
+        window.destroy()
+
+    ttk.Button(
+        window,
+        text="Hozzáadás",
+        command=save_service
+    ).pack(pady=20)
 
 
 check_button = ttk.Button(
@@ -162,5 +287,28 @@ check_button = ttk.Button(
 )
 check_button.pack(anchor="e", pady=10)
 
+auto_checkbox = ttk.Checkbutton(
+    app,
+    text="Automatikus ellenőrzés (10 másodperc)",
+    variable=auto_check
+)
+auto_checkbox.pack(anchor="e", pady=5)
+
+
+chart_button = ttk.Button(
+    app,
+    text="Válaszidőgrafikon megjelenítése",
+    command=show_chart
+)
+chart_button.pack(anchor="e", pady=5)
+
+add_button = ttk.Button(
+    app,
+    text="Új szolgáltatás hozzáadása",
+    command=add_service
+)
+add_button.pack(anchor="e", pady=5)
+
 root.after(100, process_results)
+root.after(10000, automatic_check)
 root.mainloop()
